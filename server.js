@@ -1,11 +1,13 @@
 import { createClient } from "@libsql/client"
 import { v4 as uuidv4 } from 'uuid'
+import morgan from 'morgan'
 
 const express = require('express')
 const app = express()
 const port = 3000
 
 app.use(express.json())
+app.use(morgan('tiny'))
 
 const client = createClient({
   url: process.env.TURSO_DATABASE_URL,
@@ -13,10 +15,10 @@ const client = createClient({
 })
 
 let goals = []
+let tasksByCategory = []
+let tasksByDate = []
 
-const goalsNew = []
-
-const tasks = [
+const tasksOld = [
   [
     '04-17-2024',
     {
@@ -54,11 +56,6 @@ app.get('/testing', async (req, res) => {
   res.send({Hello:'World'})
 })
 
-// List tasks
-app.get('/tasks', (req, res) => {
-  res.send(tasks)
-})
-
 // List goals
 app.get('/goals', (req, res) => {
   res.send(goals)
@@ -80,7 +77,7 @@ app.put('/goals/:id', async (req, res) => {
     ]
   })
   console.log(result)
-  await loadFromDatabase()
+  await loadGoalsFromDatabase()
   
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
@@ -109,7 +106,7 @@ app.post('/goals', async (req, res) => {
   })
 
   // Reload the data
-  await loadFromDatabase()
+  await loadGoalsFromDatabase()
 
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
@@ -121,6 +118,19 @@ app.post('/goals', async (req, res) => {
 
 // Delete goal
 app.delete('/goals/:id', async (req, res) => {
+  console.log('deleting a goal for sure')
+  console.log('request body')
+  console.log(req.body)
+  console.log('request headers')
+  console.log(req.headers)
+  console.log(req.params)
+
+  // First delete from GoalComplete
+  await client.execute({
+    sql: `DELETE FROM GoalComplete WHERE goalId=?`,
+    args: [req.params.id]
+  })
+
   // Delete from database
   const result = await client.execute({
     sql: `DELETE FROM Goal WHERE id=?`,
@@ -128,7 +138,7 @@ app.delete('/goals/:id', async (req, res) => {
   })
 
   // Reload data from database for reading
-  await loadFromDatabase()
+  await loadGoalsFromDatabase()
 
   // Send a response
   if (result.rowsAffected == 1) {
@@ -137,11 +147,6 @@ app.delete('/goals/:id', async (req, res) => {
     res.status(500).send({message: 'Database error'})
   }
 })
-
-// // Get goalComplete
-// app.get('/goalComplete/:id/:date', async (req, res) => {
-//   // Check database to see if
-// })
 
 // Update goalComplete
 app.put('/goalcomplete/:id/:date', async (req, res) => {
@@ -175,7 +180,7 @@ app.put('/goalcomplete/:id/:date', async (req, res) => {
     })
   }
 
-  await loadFromDatabase()
+  await loadGoalsFromDatabase()
   if (result.rowsAffected == 1) {
     res.send({message: 'Success', newCompleted: req.body.completed})
   } else {
@@ -183,7 +188,104 @@ app.put('/goalcomplete/:id/:date', async (req, res) => {
   }
 })
 
-async function loadFromDatabase() {
+// List tasks
+app.get('/tasks/:type', (req, res) => {
+  if (req.params.type == 'category') {
+    res.send(tasksByCategory)
+  } else if (req.params.type == 'date') {
+    res.send(tasksByDate)
+  } else {
+    res.status(404).send({message: 'Error: Valid type not specified'})
+  }
+})
+
+// Update task
+app.put('/tasks/:id', async (req, res) => {
+  const result = await client.execute({
+    sql: `UPDATE Task
+          SET title=?, date=?, description=?, completed=?, category=?
+          WHERE id=?`,
+    args: [
+      req.body.title,
+      req.body.date,
+      req.body.description,
+      req.body.completed ? 1 : 0,
+      req.body.category,
+      req.params.id
+    ]
+  })
+  console.log(result)
+  await loadTasksFromDatabase()
+  
+  // Send a response based on success or failure
+  if (result.rowsAffected == 1) {
+    res.send({message: 'Success'})
+  } else {
+    res.status(500).send({message: 'Database error'})
+  }
+})
+
+// Create task
+app.post('/tasks', async (req, res) => {
+  console.log('in here!!!!')
+  // Creat a UUID
+  let newUuid = uuidv4()
+
+  // Send to the database
+  const result = await client.execute({
+    sql: `INSERT INTO Task VALUES(?,?,?,?,?,?)`,
+    args: [
+      newUuid,
+      req.body.title,
+      req.body.date,
+      req.body.description,
+      req.body.completed,
+      req.body.category
+    ]
+  })
+
+  // Reload the data
+  await loadTasksFromDatabase()
+
+  // Send a response based on success or failure
+  if (result.rowsAffected == 1) {
+    res.status(201).send({message: 'Success', id: req.params.id})
+  } else {
+    res.status(500).send({message: 'Database error'})
+  }
+})
+
+// Delete task
+app.delete('/tasks/:id', async (req, res) => {
+  console.log('deleting a task')
+  // Delete from database
+  const result = await client.execute({
+    sql: `DELETE FROM Task WHERE id=?`,
+    args: [req.params.id]
+  })
+
+  // Reload data from database for reading
+  await loadTasksFromDatabase()
+
+  // Send a response
+  if (result.rowsAffected == 1) {
+    res.send({message: `Deleted task with id ${req.params.id}`})
+  } else {
+    res.status(500).send({message: 'Database error'})
+  }
+})
+
+app.delete('*', async (req, res) => {
+  console.log('deleting somethin for sure')
+  console.log('request body')
+  console.log(req.body)
+  console.log('request headers')
+  console.log(req.headers)
+  console.log(req.params)
+  res.status(404).send({message: 'Oops!'})
+})
+
+async function loadGoalsFromDatabase() {
   // Retrieve the goals from the database
   let goalResult = await client.execute('SELECT * FROM Goal')
   let goalsTemp = {}
@@ -231,9 +333,76 @@ async function loadFromDatabase() {
   }
 }
 
+async function loadTasksFromDatabase() {
+  // Retrieve the goals from the database
+  let taskResult = await client.execute('SELECT * FROM Task')
+  let categoryTemp = {}
+  let dateTemp = {}
+  let sortedData = []
+  // let dataRowFormatted = {}
+  function sortByDate(a, b) {
+    let aDate = new Date(a.date)
+    let bDate = new Date(b.date)
+    return aDate.getTime() - bDate.getTime()
+  }
+
+  // Format and then sort by date
+  for (let dataRow of taskResult.rows) {
+    let dataRowFormatted = {
+      id: dataRow.id,
+      title: dataRow.title,
+      date: dataRow.date,
+      description: dataRow.description,
+      completed: dataRow.completed == 1,
+      category: dataRow.category.toString()
+    }
+    sortedData.push(dataRowFormatted)
+  }
+  sortedData.sort(sortByDate)
+  
+  // Put the results into an object sorted by category
+  for (let dataRow of sortedData) {
+    // Create an object to store tasks by category
+    if (Object.hasOwn(categoryTemp, dataRow.category)) {
+      categoryTemp[dataRow.category].push(dataRow)
+    } else {
+      categoryTemp[dataRow.category] = [dataRow]
+    }
+
+    // Create an object to store tasks by date
+    if (Object.hasOwn(dateTemp, dataRow.date)) {
+      dateTemp[dataRow.date].push(dataRow)
+    } else {
+      dateTemp[dataRow.date] = [dataRow]
+    }
+  }
+
+  // Turn it into the list formats the client needs
+  tasksByCategory = []
+  for (const property in categoryTemp) {
+    let categoryArr = []
+    categoryArr.push(property)
+    for (const dataItem of categoryTemp[property]) {
+      categoryArr.push(dataItem)
+    }
+    tasksByCategory.push(categoryArr)
+  }
+
+  tasksByDate = []
+  for (const property in dateTemp) {
+    let dateArr = []
+    dateArr.push(property)
+    for (const dataItem of dateTemp[property]) {
+      dateArr.push(dataItem)
+    }
+    tasksByDate.push(dateArr)
+  }
+}
+
 app.listen(port, async () => {
   console.log('Loading data from database...')
-  await loadFromDatabase()
+  await loadGoalsFromDatabase()
+  await loadTasksFromDatabase()
 
   console.log(`Server listening on port ${port}`)
 })
