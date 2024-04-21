@@ -18,39 +18,6 @@ let goals = []
 let tasksByCategory = []
 let tasksByDate = []
 
-const tasksOld = [
-  [
-    '04-17-2024',
-    {
-      id: 1,
-      title: 'Module 11 homework',
-      date: '04-17-2024',
-      description: 'Read chapters and discuss with group',
-      completed: false,
-      categoryId: 1
-    },
-    {
-      id: 2,
-      title: 'Email professor about extra credit',
-      date: '04-17-2024',
-      description: '',
-      completed: false,
-      categoryId: 1
-    }
-  ],
-  [
-    '04-18-2024',
-    {
-      id: 3,
-      title: 'Set up girls lunch',
-      date: '04-18-2024',
-      description: 'Remember to invite Jessica, Mikell, and Avery',
-      completed: false,
-      categoryId: 5
-    }
-  ]
-]
-
 // Test route
 app.get('/testing', async (req, res) => {
   res.send({Hello:'World'})
@@ -59,6 +26,27 @@ app.get('/testing', async (req, res) => {
 // List goals
 app.get('/goals', (req, res) => {
   res.send(goals)
+})
+
+// List goals unsorted
+app.get('/goals/list', async (req, res) => {
+  const result = await client.execute('SELECT * FROM Goal')
+  
+  // Format result
+  let resultArr = []
+  for (let dataRow of result.rows) {
+    let dataRowFormatted = {
+      id: dataRow.id,
+      title: dataRow.title,
+      description: dataRow.description,
+      frequency: dataRow.frequency,
+      quantity: dataRow.quantity,
+      category: dataRow.category.toString()
+    }
+    resultArr.push(dataRowFormatted)
+  }
+
+  res.send({goals: resultArr})
 })
 
 // Update goal
@@ -76,7 +64,6 @@ app.put('/goals/:id', async (req, res) => {
       req.params.id
     ]
   })
-  console.log(result)
   await loadGoalsFromDatabase()
   
   // Send a response based on success or failure
@@ -188,6 +175,102 @@ app.put('/goalcomplete/:id/:date', async (req, res) => {
   }
 })
 
+// Read tasks associated with specified goal
+app.get('/goals/:goalId/tasks', async (req, res) => {
+  let result = await client.execute({
+    sql: `SELECT id, title, date, description, completed, category
+          FROM Task, GoalTask
+          WHERE GoalTask.goalId = ? AND GoalTask.taskId = Task.id`,
+    args: [req.params.goalId]
+  })
+
+  let resultArr = []
+  // Format result
+  for (let dataRow of result.rows) {
+    let dataRowFormatted = {
+      id: dataRow.id,
+      title: dataRow.title,
+      date: dataRow.date,
+      description: dataRow.description,
+      completed: dataRow.completed,
+      category: dataRow.category.toString()
+    }
+    resultArr.push(dataRowFormatted)
+  }
+
+  res.send({tasks: resultArr})
+})
+
+// Read goals associated with specified task
+app.get('/tasks/:taskId/goals', async (req, res) => {
+  let result = await client.execute({
+    sql: `SELECT id, title, description, frequency, quantity, category
+          FROM Goal, GoalTask
+          WHERE GoalTask.taskId = ? AND GoalTask.goalId = Goal.id`,
+    args: [req.params.taskId]
+  })
+
+  let resultArr = []
+  // Format result
+  for (let dataRow of result.rows) {
+    let dataRowFormatted = {
+      id: dataRow.id,
+      title: dataRow.title,
+      description: dataRow.description,
+      frequency: dataRow.frequency,
+      quantity: dataRow.quantity,
+      category: dataRow.category.toString()
+    }
+    resultArr.push(dataRowFormatted)
+  }
+
+  res.send({goals: resultArr})
+})
+
+// Update goals associated with a specified task
+app.put('/tasks/:taskId/goals', async (req, res) => {
+  let err = false
+  let deletes = 0
+  let inserts = 0
+
+  // Get current rows
+  const currResult = await client.execute({
+    sql: 'SELECT * FROM GoalTask WHERE taskId = ?',
+    args: [req.params.taskId]
+  })
+
+  // Go through current rows and delete any that aren't in the request
+  for (let row of currResult.rows) {
+    if (!req.body.goalIds.includes(row.goalId)) {
+      const deleteResult = await client.execute({
+        sql: 'DELETE FROM GoalTask WHERE goalId = ? AND taskId = ?',
+        args: [row.goalId, req.params.taskId]
+      })
+      if (deleteResult.rowsAffected != 1) err = true
+      else deletes++
+    }
+  }
+
+  // Insert any that aren't already in the table
+  for (let goalId of req.body.goalIds) {
+    if (!currResult.rows.some((item) => item.goalId == goalId)) {
+      const insertResult = await client.execute({
+        sql: 'INSERT INTO GoalTask Values(?,?)',
+        args: [goalId, req.params.taskId]
+      })
+      if (insertResult.rowsAffected != 1) err = true
+      else inserts++
+    }
+  }
+
+  // Send a response based on success or failure
+  if (!err) {
+    res.send({message: 'Success', inserts: inserts, deletes: deletes})
+  } else {
+    res.status(500).send({message: 'Database error'})
+  }
+})
+
 // List tasks
 app.get('/tasks/:type', (req, res) => {
   if (req.params.type == 'category') {
@@ -214,7 +297,6 @@ app.put('/tasks/:id', async (req, res) => {
       req.params.id
     ]
   })
-  console.log(result)
   await loadTasksFromDatabase()
   
   // Send a response based on success or failure
@@ -227,7 +309,6 @@ app.put('/tasks/:id', async (req, res) => {
 
 // Create task
 app.post('/tasks', async (req, res) => {
-  console.log('in here!!!!')
   // Creat a UUID
   let newUuid = uuidv4()
 
@@ -249,7 +330,7 @@ app.post('/tasks', async (req, res) => {
 
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
-    res.status(201).send({message: 'Success', id: req.params.id})
+    res.status(201).send({message: 'Success', id: newUuid})
   } else {
     res.status(500).send({message: 'Database error'})
   }
@@ -257,7 +338,12 @@ app.post('/tasks', async (req, res) => {
 
 // Delete task
 app.delete('/tasks/:id', async (req, res) => {
-  console.log('deleting a task')
+  // First delete from GoalTask
+  const goalTaskResult = await client.execute({
+    sql: `DELETE FROM GoalTask WHERE taskId=?`,
+    args: [req.params.id]
+  })
+
   // Delete from database
   const result = await client.execute({
     sql: `DELETE FROM Task WHERE id=?`,
@@ -276,7 +362,15 @@ app.delete('/tasks/:id', async (req, res) => {
 })
 
 app.delete('*', async (req, res) => {
-  console.log('deleting somethin for sure')
+  console.log('request body')
+  console.log(req.body)
+  console.log('request headers')
+  console.log(req.headers)
+  console.log(req.params)
+  res.status(404).send({message: 'Oops!'})
+})
+
+app.put('*', async (req, res) => {
   console.log('request body')
   console.log(req.body)
   console.log('request headers')
