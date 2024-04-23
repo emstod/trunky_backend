@@ -430,14 +430,44 @@ app.get('/tasks/list', async (req, res) => {
   res.send({tasks: resultArr})
 })
 
-// List tasks
-app.get('/tasks/all/:type', (req, res) => {
-  if (req.params.type == 'category') {
-    res.send(tasksByCategory)
-  } else if (req.params.type == 'date') {
-    res.send(tasksByDate)
+// List tasks by category
+app.get('/tasks/all/category', (req, res) => {
+  res.send({tasks: tasksByCategory, end: true})
+})
+
+// List tasks by date
+app.get('/tasks/all/date', (req, res) => {
+  res.send(tasksByDate)
+})
+
+// List tasks by date paginated
+app.get('/tasks/all/date/:page', (req, res) => {
+  // Remove the current and future tasks
+  let oldestFirst = [...tasksByDate]
+  let newestFirst = oldestFirst.reverse()
+  let currFuture = []
+  const today = new Date()
+  const todayStr = today.toDateString()
+  for (let taskList of newestFirst) {
+    if (taskList[0] == todayStr) {
+      currFuture.push(newestFirst.shift())
+      currFuture.push(newestFirst.shift())
+      break
+    }
+    currFuture.push(newestFirst.shift())
+  }
+
+  let end = false
+  if (req.params.page == '0') {
+    if (newestFirst.length == 0) end = true
+    res.send({tasks: currFuture.reverse(), end: end})
   } else {
-    res.status(404).send({message: 'Error: Valid type not specified'})
+    const offset = (parseInt(req.params.page) - 1) * 5
+    if (offset + 5 >= newestFirst.length) {
+      end = true
+    }
+    const toSend = newestFirst.slice(0, offset + 5)
+    res.send({tasks: toSend.reverse(), end: end})
   }
 })
 
@@ -609,7 +639,7 @@ async function loadGoalsFromDatabase() {
 }
 
 async function loadTasksFromDatabase() {
-  // Retrieve the goals from the database
+  // Retrieve the tasks from the database
   let taskResult = await client.execute('SELECT * FROM Task')
   let categoryTemp = {}
   let dateTemp = {}
