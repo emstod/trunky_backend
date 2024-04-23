@@ -49,6 +49,75 @@ app.get('/goals/list', async (req, res) => {
   res.send({goals: resultArr})
 })
 
+// List daily goals
+app.get('/goals/daily', async (req, res) => {
+  let today = new Date()
+  let todayStr = today.toDateString()
+  let allDaily = await client.execute(`SELECT id, title, description, frequency, quantity, category
+                                        FROM Goal
+                                        WHERE frequency="daily"`)
+
+  const formattedData = []
+  for (let row of allDaily.rows) {
+    formattedData.push({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      frequency: row.frequency,
+      quantity: row.quantity,
+      category: row.category
+    })
+  }
+
+  // Get goal completed information
+  for (let row of formattedData) {
+    let response = await client.execute({
+      sql: 'SELECT completed FROM goalComplete WHERE goalId=? AND date=?',
+      args: [row.id, todayStr]
+    })
+    if (response.rows.length === 0) {
+      row.completed = 0
+    } else {
+      row.completed = response.rows[0].completed
+    }
+  }
+  res.send({goals: formattedData}) 
+})
+
+
+// Read one goal
+app.get('/goals/:id', async (req, res) => {
+  let response = await client.execute({
+    sql: 'SELECT * FROM Goal WHERE id=?',
+    args: [req.params.id]
+  })
+
+  const row = response.rows[0]
+
+  const formattedResponse = {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    frequency: row.frequency,
+    quantity: row.quantity,
+    category: row.category
+  }
+
+  // Get goal completed information
+  const today = new Date()
+  response = await client.execute({
+    sql: 'SELECT completed FROM goalComplete WHERE goalId=? AND date=?',
+    args: [req.params.id, today.toDateString()]
+  })
+  if (response.rows.length === 0) {
+    formattedResponse.completed = 0
+  } else {
+    formattedResponse.completed = response.rows[0].completed
+  }
+
+  res.send({goal: formattedResponse})
+})
+
 // Update goal
 app.put('/goals/:id', async (req, res) => {
   const result = await client.execute({
@@ -97,7 +166,7 @@ app.post('/goals', async (req, res) => {
 
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
-    res.status(201).send({message: 'Success', id: req.params.id})
+    res.status(201).send({message: 'Success', id: newUuid})
   } else {
     res.status(500).send({message: 'Database error'})
   }
@@ -105,16 +174,15 @@ app.post('/goals', async (req, res) => {
 
 // Delete goal
 app.delete('/goals/:id', async (req, res) => {
-  console.log('deleting a goal for sure')
-  console.log('request body')
-  console.log(req.body)
-  console.log('request headers')
-  console.log(req.headers)
-  console.log(req.params)
-
   // First delete from GoalComplete
   await client.execute({
     sql: `DELETE FROM GoalComplete WHERE goalId=?`,
+    args: [req.params.id]
+  })
+
+  // Then delete from GoalTask
+  await client.execute({
+    sql: `DELETE FROM GoalTask WHERE goalId=?`,
     args: [req.params.id]
   })
 
@@ -159,13 +227,16 @@ app.put('/goalcomplete/:id/:date', async (req, res) => {
     result = await client.execute({
       sql: `UPDATE goalComplete
             SET completed=?
-            WHERE goalId=?`,
+            WHERE goalId=?
+            AND date=?`,
       args: [
         req.body.completed,
-        req.params.id
+        req.params.id,
+        req.params.date
       ]
     })
   }
+  console.log(result)
 
   await loadGoalsFromDatabase()
   if (result.rowsAffected == 1) {
@@ -199,6 +270,50 @@ app.get('/goals/:goalId/tasks', async (req, res) => {
   }
 
   res.send({tasks: resultArr})
+})
+
+// Update tasks associated with a specified goal
+app.put('/goals/:goalId/tasks', async (req, res) => {
+  let err = false
+  let deletes = 0
+  let inserts = 0
+
+  // Get current rows
+  const currResult = await client.execute({
+    sql: 'SELECT * FROM GoalTask WHERE goalId = ?',
+    args: [req.params.goalId]
+  })
+
+  // Go through current rows and delete any that aren't in the request
+  for (let row of currResult.rows) {
+    if (!req.body.taskIds.includes(row.taskId)) {
+      const deleteResult = await client.execute({
+        sql: 'DELETE FROM GoalTask WHERE taskId = ? AND goalId = ?',
+        args: [row.taskId, req.params.goalId]
+      })
+      if (deleteResult.rowsAffected != 1) err = true
+      else deletes++
+    }
+  }
+
+  // Insert any that aren't already in the table
+  for (let taskId of req.body.taskIds) {
+    if (!currResult.rows.some((item) => item.taskId == taskId)) {
+      const insertResult = await client.execute({
+        sql: 'INSERT INTO GoalTask Values(?,?)',
+        args: [req.params.goalId, taskId]
+      })
+      if (insertResult.rowsAffected != 1) err = true
+      else inserts++
+    }
+  }
+
+  // Send a response based on success or failure
+  if (!err) {
+    res.send({message: 'Success', inserts: inserts, deletes: deletes})
+  } else {
+    res.status(500).send({message: 'Database error'})
+  }
 })
 
 // Read goals associated with specified task
@@ -271,8 +386,52 @@ app.put('/tasks/:taskId/goals', async (req, res) => {
   }
 })
 
+// List tasks for a date
+app.get('/tasks/date/:date', async (req, res) => {
+  const response = await client.execute({
+    sql: 'SELECT * FROM Task WHERE date=?',
+    args: [req.params.date]
+  })
+
+  const formattedData = []
+  for (let row of response.rows) {
+    formattedData.push({
+      id: row.id,
+      title: row.title,
+      date: row.date,
+      description: row.description,
+      completed: row.completed,
+      category: row.category
+    })
+  }
+
+  res.send({tasks: formattedData}) 
+})
+
+// List tasks unsorted
+app.get('/tasks/list', async (req, res) => {
+  console.log('in here')
+  const result = await client.execute('SELECT * FROM Task')
+  
+  // Format result
+  let resultArr = []
+  for (let dataRow of result.rows) {
+    let dataRowFormatted = {
+      id: dataRow.id,
+      title: dataRow.title,
+      date: dataRow.date,
+      description: dataRow.description,
+      completed: dataRow.completed,
+      category: dataRow.category.toString()
+    }
+    resultArr.push(dataRowFormatted)
+  }
+  console.log(resultArr)
+  res.send({tasks: resultArr})
+})
+
 // List tasks
-app.get('/tasks/:type', (req, res) => {
+app.get('/tasks/all/:type', (req, res) => {
   if (req.params.type == 'category') {
     res.send(tasksByCategory)
   } else if (req.params.type == 'date') {
@@ -280,6 +439,28 @@ app.get('/tasks/:type', (req, res) => {
   } else {
     res.status(404).send({message: 'Error: Valid type not specified'})
   }
+})
+
+// Read one task
+app.get('/tasks/:id', async (req, res) => {
+  console.log(req.params.id)
+  let response = await client.execute({
+    sql: 'SELECT * FROM Task WHERE id=?',
+    args: [req.params.id]
+  })
+
+  const row = response.rows[0]
+
+  const formattedResponse = {
+    id: row.id,
+    title: row.title,
+    date: row.date,
+    description: row.description,
+    completed: row.completed,
+    category: row.category
+  }
+
+  res.send({task: formattedResponse})
 })
 
 // Update task
