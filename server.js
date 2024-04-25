@@ -446,28 +446,39 @@ app.get('/tasks/all/date/:page', (req, res) => {
   let oldestFirst = [...tasksByDate]
   let newestFirst = oldestFirst.reverse()
   let currFuture = []
-  const today = new Date()
-  const todayStr = today.toDateString()
-  for (let taskList of newestFirst) {
-    if (taskList[0] == todayStr) {
-      currFuture.push(newestFirst.shift())
-      currFuture.push(newestFirst.shift())
-      break
-    }
+  const todayStr = new Date().toDateString()
+  const todayMs = new Date(todayStr).getTime()
+
+  // Exit the loop if the list is empty
+  while (newestFirst.length > 0) {
+    // Get the milliseconds since epoch for the date
+    let taskListDate = new Date(newestFirst[0][0])
+    let taskListMs = taskListDate.getTime()
+
+    // If it's a past date, we're done pulling items off the list
+    if (taskListMs < todayMs) break
+
+    // If it's today or a future date, pull it off the list
     currFuture.push(newestFirst.shift())
   }
 
   let end = false
+  // If we're looking for only current and future events, send that
+  // and send end = true if there are no more events to send
   if (req.params.page == '0') {
     if (newestFirst.length == 0) end = true
     res.send({tasks: currFuture.reverse(), end: end})
   } else {
+    // If we're looking for a different page, calculate the offset
     const offset = (parseInt(req.params.page) - 1) * 5
     if (offset + 5 >= newestFirst.length) {
       end = true
     }
+
+    // Get the set of events to send and add it to the current and future events
     const toSend = newestFirst.slice(0, offset + 5)
-    res.send({tasks: toSend.reverse(), end: end})
+    const fullToSend = currFuture.concat(toSend)
+    res.send({tasks: fullToSend.reverse(), end: end})
   }
 })
 
