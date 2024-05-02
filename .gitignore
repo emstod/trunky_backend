@@ -1,7 +1,7 @@
 # Based on https://raw.githubusercontent.com/github/gitignore/main/Node.gitignore
 
 # Testing/Misc
-test.js
+sandbox.js
 elephantgraveyard.js
 
 # Logs

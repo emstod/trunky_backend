@@ -1,6 +1,8 @@
 import { createClient } from "@libsql/client"
 import { v4 as uuidv4 } from 'uuid'
 import morgan from 'morgan'
+import bcrypt from 'bcryptjs'
+import cryptoRandomString from 'crypto-random-string'
 
 const express = require('express')
 const app = express()
@@ -8,15 +10,26 @@ const port = 3000
 
 app.use(express.json())
 app.use(morgan('tiny'))
+app.use(authorize)
 
 const client = createClient({
   url: process.env.TURSO_DATABASE_URL,
   authToken: process.env.TURSO_AUTH_TOKEN
 })
 
-let goals = []
-let tasksByCategory = []
-let tasksByDate = []
+// let goals = []
+// let tasksByCategory = []
+// let tasksByDate = []
+
+// Authorization middleware
+function authorize(req, res, next) {
+  if (!req.headers.authorization) {
+    console.log('Unauthorized request')
+    res.status(401).send({message: 'Unauthorized'})
+  } else {
+    next()
+  }
+}
 
 async function getCompletionDate(date, goalId) {
   // Get the frequency
@@ -77,19 +90,63 @@ app.get('/testing', async (req, res) => {
   res.send({Hello:'World'})
 })
 
+// Get user token
+app.get('/users/:username/:password', async (req, res) => {
+  try {
+    let result = await client.execute({
+      sql: 'SELECT password, token FROM User WHERE username=?',
+      args: [req.params.username]
+    })
+    console.log(result.rows[0].password)
+    if (result.rows.length > 0) {
+      if (bcrypt.compareSync(req.params.password, result.rows[0].password))
+        res.status(200).send({token: result.rows[0].token})
+    } else {
+      res.status(404).send({token: null})
+    }
+  } catch(error) {
+    console.error(error)
+    res.status(500).send({token: null})
+  }
+})
+
+// Create user
+app.post('/users', async (req, res) => {
+  console.log(req.body.username, req.body.password)
+  let hash = bcrypt.hashSync(req.body.password, 10)
+  let token = cryptoRandomString({length: 50})
+  let result = await client.execute({
+    sql: 'INSERT INTO User VALUES (?,?,?)',
+    args: [req.body.username, hash, token]
+  })
+  console.log(result)
+  
+  // Send a response based on success or failure
+  if (result.rowsAffected == 1) {
+    res.status(201).send({token: token})
+  } else {
+    res.status(500).send({message: 'Database error'})
+  }
+})
+
 // List goals
 app.get('/goals', async (req, res) => {
   // For list grouped by category, send the goals object already stored
   if (req.query.listtype == 'category')  {
+    let goals = await loadGoalsFromDatabase(req.headers.authorization)
     res.send(goals)
   } else if (req.query.listtype == 'none') {
     // For uncategorized list, check first if we are looking for only daily goals
     if (req.query.frequency == 'daily') {
       let today = new Date()
       let todayStr = today.toDateString()
-      let allDaily = await client.execute(`SELECT id, title, description, frequency, quantity, category
-                                            FROM Goal
-                                            WHERE frequency="daily"`)
+      let allDaily = await client.execute({
+        sql: `SELECT id, title, description, frequency, quantity, category
+              FROM Goal
+              WHERE frequency="daily"
+              AND user=?`,
+        args: [req.headers.authorization]
+      })
 
       const formattedData = []
       for (let row of allDaily.rows) {
@@ -118,7 +175,10 @@ app.get('/goals', async (req, res) => {
       res.send(formattedData)
       return
     }
-    const result = await client.execute('SELECT * FROM Goal')
+    const result = await client.execute({
+      sql: 'SELECT * FROM Goal WHERE user=?',
+      args: [req.headers.authorization]
+    })
   
     // Format result
     const formattedData = []
@@ -186,7 +246,6 @@ app.put('/goals/:id', async (req, res) => {
       req.params.id
     ]
   })
-  await loadGoalsFromDatabase()
   
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
@@ -203,19 +262,17 @@ app.post('/goals', async (req, res) => {
 
   // Send to the database
   const result = await client.execute({
-    sql: `INSERT INTO Goal VALUES(?,?,?,?,?,?)`,
+    sql: `INSERT INTO Goal VALUES(?,?,?,?,?,?,?)`,
     args: [
       newUuid,
       req.body.title,
       req.body.description,
       req.body.frequency,
       req.body.quantity,
-      req.body.category
+      req.body.category,
+      req.headers.authorization
     ]
   })
-
-  // Reload the data
-  await loadGoalsFromDatabase()
 
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
@@ -244,9 +301,6 @@ app.delete('/goals/:id', async (req, res) => {
     sql: `DELETE FROM Goal WHERE id=?`,
     args: [req.params.id]
   })
-
-  // Reload data from database for reading
-  await loadGoalsFromDatabase()
 
   // Send a response
   if (result.rowsAffected == 1) {
@@ -294,7 +348,6 @@ app.put('/goalcomplete/:id/:date', async (req, res) => {
   }
   console.log(result)
 
-  await loadGoalsFromDatabase()
   if (result.rowsAffected == 1) {
     res.send({message: 'Success', newCompleted: req.body.completed})
   } else {
@@ -445,6 +498,8 @@ app.put('/tasks/:taskId/goals', async (req, res) => {
 // List tasks
 app.get('/tasks', async (req, res) => {
   if (req.query.listtype == 'date') { // grouped by date
+    let tasksByDate =  await loadTasksFromDatabase(req.headers.authorization, 'date')
+
     // If page param exists, send paginated data
     if (req.query.page) {
       // Remove the current and future tasks
@@ -471,7 +526,8 @@ app.get('/tasks', async (req, res) => {
       // If we're looking for only current and future events, send that
       // and send end = true if there are no more events to send
       if (req.query.page == '0') {
-        if (newestFirst.length == 0) end = true
+        end = newestFirst.length == 0
+        // if (newestFirst.length == 0) end = true
         res.send({tasks: currFuture.reverse(), end: end})
       } else {
         // If we're looking for a different page, calculate the offset
@@ -491,13 +547,15 @@ app.get('/tasks', async (req, res) => {
     // If no page parameter was sent, send all data
     res.send({tasks: tasksByDate, end: true})
   } else if (req.query.listtype == 'category') { // grouped by category
-    res.send({tasks: tasksByCategory, end: true})
+    let tasksByCategory = await loadTasksFromDatabase(req.headers.authorization, 'category')
+      res.send({tasks: tasksByCategory, end: true})
   } else if (req.query.listtype == 'none') { // ungrouped
     if (req.query.date) {
+      console.log('auth:', req.headers.authorization)
       // Send a list of tasks for the specified date
       const response = await client.execute({
-        sql: 'SELECT * FROM Task WHERE date=?',
-        args: [req.query.date]
+        sql: 'SELECT * FROM Task WHERE date=? AND user=?',
+        args: [req.query.date, req.headers.authorization]
       })
     
       const formattedData = []
@@ -514,8 +572,12 @@ app.get('/tasks', async (req, res) => {
     
       res.send({tasks: formattedData, end: true})
     } else {
+      console.log('in here')
       // Send an unsorted list of all tasks
-      const result = await client.execute('SELECT * FROM Task')
+      const result = await client.execute({
+        sql: 'SELECT * FROM Task WHERE user=?',
+        args: [req.headers.authorization]
+      })
     
       // Format result
       let resultArr = []
@@ -573,7 +635,6 @@ app.put('/tasks/:id', async (req, res) => {
       req.params.id
     ]
   })
-  await loadTasksFromDatabase()
   
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
@@ -585,24 +646,26 @@ app.put('/tasks/:id', async (req, res) => {
 
 // Create task
 app.post('/tasks', async (req, res) => {
-  // Creat a UUID
+  // Create a UUID
   let newUuid = uuidv4()
+
+  console.log(`Creating task for user ${req.headers.authorization}`)
 
   // Send to the database
   const result = await client.execute({
-    sql: `INSERT INTO Task VALUES(?,?,?,?,?,?)`,
+    sql: `INSERT INTO Task VALUES(?,?,?,?,?,?,?)`,
     args: [
       newUuid,
       req.body.title,
       req.body.date,
       req.body.description,
       req.body.completed,
-      req.body.category
+      req.body.category,
+      req.headers.authorization
     ]
   })
 
-  // Reload the data
-  await loadTasksFromDatabase()
+  console.log('just inserted')
 
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
@@ -626,8 +689,7 @@ app.delete('/tasks/:id', async (req, res) => {
     args: [req.params.id]
   })
 
-  // Reload data from database for reading
-  await loadTasksFromDatabase()
+  console.log(req.headers)
 
   // Send a response
   if (result.rowsAffected == 1) {
@@ -655,9 +717,12 @@ app.delete('/tasks/:id', async (req, res) => {
 //   res.status(404).send({message: 'Oops!'})
 // })
 
-async function loadGoalsFromDatabase() {
+async function loadGoalsFromDatabase(user) {
   // Retrieve the goals from the database
-  let goalResult = await client.execute('SELECT * FROM Goal')
+  let goalResult = await client.execute({
+    sql: 'SELECT * FROM Goal WHERE user=?',
+    args: [user]
+  })
   let goalsTemp = {}
   let dataRowFormatted = {}
 
@@ -693,7 +758,7 @@ async function loadGoalsFromDatabase() {
   }
 
   // Turn it into the list format the client needs
-  goals = []
+  let goals = []
   for (const property in goalsTemp) {
     let categoryArr = []
     categoryArr.push(property)
@@ -702,11 +767,15 @@ async function loadGoalsFromDatabase() {
     }
     goals.push(categoryArr)
   }
+  return goals
 }
 
-async function loadTasksFromDatabase() {
+async function loadTasksFromDatabase(user, listType) {
   // Retrieve the tasks from the database
-  let taskResult = await client.execute('SELECT * FROM Task')
+  let taskResult = await client.execute({
+    sql: 'SELECT * FROM Task WHERE user=?',
+    args: [user]
+  })
   let categoryTemp = {}
   let dateTemp = {}
   let sortedData = []
@@ -749,32 +818,32 @@ async function loadTasksFromDatabase() {
   }
 
   // Turn it into the list formats the client needs
-  tasksByCategory = []
-  for (const property in categoryTemp) {
-    let categoryArr = []
-    categoryArr.push(property)
-    for (const dataItem of categoryTemp[property]) {
-      categoryArr.push(dataItem)
+  if (listType === 'category') {
+    let tasksByCategory = []
+    for (const property in categoryTemp) {
+      let categoryArr = []
+      categoryArr.push(property)
+      for (const dataItem of categoryTemp[property]) {
+        categoryArr.push(dataItem)
+      }
+      tasksByCategory.push(categoryArr)
     }
-    tasksByCategory.push(categoryArr)
-  }
-
-  tasksByDate = []
-  for (const property in dateTemp) {
-    let dateArr = []
-    dateArr.push(property)
-    for (const dataItem of dateTemp[property]) {
-      dateArr.push(dataItem)
+    return tasksByCategory
+  } else if (listType === 'date') {
+    let tasksByDate = []
+    for (const property in dateTemp) {
+      let dateArr = []
+      dateArr.push(property)
+      for (const dataItem of dateTemp[property]) {
+        dateArr.push(dataItem)
+      }
+      tasksByDate.push(dateArr)
     }
-    tasksByDate.push(dateArr)
+    return tasksByDate
   }
 }
 
 app.listen(port, async () => {
-  console.log('Loading data from database...')
-  await loadGoalsFromDatabase()
-  await loadTasksFromDatabase()
-
   console.log(`Server listening on port ${port}`)
 })
 
