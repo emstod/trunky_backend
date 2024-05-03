@@ -17,10 +17,6 @@ const client = createClient({
   authToken: process.env.TURSO_AUTH_TOKEN
 })
 
-// let goals = []
-// let tasksByCategory = []
-// let tasksByDate = []
-
 // Authorization middleware
 function authorize(req, res, next) {
   if (!req.headers.authorization) {
@@ -41,7 +37,6 @@ async function getCompletionDate(date, goalId) {
 
   // Calculate the correct date to send based on goal frequency
   let completionDate = ''
-  //const today = new Date()
   switch (frequency) {
     case 'daily':
       // If the goal is daily, use original date
@@ -97,7 +92,6 @@ app.get('/users/:username/:password', async (req, res) => {
       sql: 'SELECT password, token FROM User WHERE username=?',
       args: [req.params.username]
     })
-    console.log(result.rows[0].password)
     if (result.rows.length > 0) {
       if (bcrypt.compareSync(req.params.password, result.rows[0].password))
         res.status(200).send({token: result.rows[0].token})
@@ -112,14 +106,12 @@ app.get('/users/:username/:password', async (req, res) => {
 
 // Create user
 app.post('/users', async (req, res) => {
-  console.log(req.body.username, req.body.password)
   let hash = bcrypt.hashSync(req.body.password, 10)
   let token = cryptoRandomString({length: 50})
   let result = await client.execute({
     sql: 'INSERT INTO User VALUES (?,?,?)',
     args: [req.body.username, hash, token]
   })
-  console.log(result)
   
   // Send a response based on success or failure
   if (result.rowsAffected == 1) {
@@ -346,7 +338,6 @@ app.put('/goalcomplete/:id/:date', async (req, res) => {
       ]
     })
   }
-  console.log(result)
 
   if (result.rowsAffected == 1) {
     res.send({message: 'Success', newCompleted: req.body.completed})
@@ -378,7 +369,24 @@ app.get('/goals/:goalId/tasks', async (req, res) => {
     resultArr.push(dataRowFormatted)
   }
 
-  res.send({tasks: resultArr})
+  // Sort by date newest to oldest
+  resultArr.sort(sortByDate)
+  resultArr.reverse()
+
+  // Get rid of duplicates
+  let filteredArr = []
+  for (let result of resultArr) {
+    let found = false
+    for (let filtered of filteredArr) {
+      if (filtered.id == result.id) {
+        found = true
+        break
+      }
+    }
+    if (!found) filteredArr.push(result)
+  }
+
+  res.send({tasks: filteredArr})
 })
 
 // Update tasks associated with a specified goal
@@ -551,7 +559,6 @@ app.get('/tasks', async (req, res) => {
       res.send({tasks: tasksByCategory, end: true})
   } else if (req.query.listtype == 'none') { // ungrouped
     if (req.query.date) {
-      console.log('auth:', req.headers.authorization)
       // Send a list of tasks for the specified date
       const response = await client.execute({
         sql: 'SELECT * FROM Task WHERE date=? AND user=?',
@@ -572,7 +579,6 @@ app.get('/tasks', async (req, res) => {
     
       res.send({tasks: formattedData, end: true})
     } else {
-      console.log('in here')
       // Send an unsorted list of all tasks
       const result = await client.execute({
         sql: 'SELECT * FROM Task WHERE user=?',
@@ -592,52 +598,168 @@ app.get('/tasks', async (req, res) => {
         }
         resultArr.push(dataRowFormatted)
       }
-      res.send({tasks: resultArr, end: true})
+
+      // Sort by date newest to oldest
+      resultArr.sort(sortByDate)
+      resultArr.reverse()
+
+      // Get rid of duplicates
+      let filteredArr = []
+      for (let result of resultArr) {
+        let found = false
+        for (let filtered of filteredArr) {
+          if (filtered.id == result.id) {
+            found = true
+            break
+          }
+        }
+        if (!found) filteredArr.push(result)
+      }
+      
+      res.send({tasks: filteredArr, end: true})
     }
   } else {
     res.status(404).send({tasks: [], end: true, message: 'Invalid list type'})
   }
 })
 
-// Read one task
+// Read one task with date
+app.get('/tasks/:id/:date', async (req, res) => {
+  let response = await client.execute({
+    sql: 'SELECT * FROM Task WHERE id=? AND DATE=?',
+    args: [req.params.id, req.params.date]
+  })
+  if (response.rows.length > 0) {
+    let row = response.rows[0]
+    let dataRowFormatted = {
+      id: row.id,
+      title: row.title,
+      date: row.date,
+      description: row.description,
+      completed: row.completed,
+      category: row.category.toString(),
+      recur: {
+        Sunday: false,
+        Monday: false,
+        Tuesday: false,
+        Wednesday: false,
+        Thursday: false,
+        Friday: false,
+        Saturday: false
+      }
+    }
+
+    // Get recur information, if applicable
+    response = await client.execute({
+      sql: 'SELECT day FROM Recur WHERE taskId=?',
+      args: [req.params.id]
+    })
+    if (response.rows.length > 0) {
+      for (let row of response.rows) {
+        dataRowFormatted.recur[row.day] = true
+      }
+    }
+
+    // Send the results
+    res.send({task: dataRowFormatted})
+  } else {
+    res.status(404).send({task: {}, message: "Not found"})
+  }
+
+})
+
+// Read one task (newest out of a recurring sequence)
 app.get('/tasks/:id', async (req, res) => {
   let response = await client.execute({
     sql: 'SELECT * FROM Task WHERE id=?',
     args: [req.params.id]
   })
 
-  const row = response.rows[0]
+  let row = {}
 
-  const formattedResponse = {
-    id: row.id,
-    title: row.title,
-    date: row.date,
-    description: row.description,
-    completed: row.completed,
-    category: row.category
+  // If multiple tasks with the same id exist (recurring tasks), get the newest one
+  if (response.rows.length > 1) {
+    // Format result
+    let resultArr = []
+    for (let dataRow of response.rows) {
+      let dataRowFormatted = {
+        id: dataRow.id,
+        title: dataRow.title,
+        date: dataRow.date,
+        description: dataRow.description,
+        completed: dataRow.completed,
+        category: dataRow.category.toString()
+      }
+      resultArr.push(dataRowFormatted)
+    }
+
+    // Sort by date and get newest
+    resultArr.sort(sortByDate)
+    row = resultArr.pop()
+
+  } else {
+    let singleResult = response.rows[0]
+    row = {
+      id: singleResult.id,
+      title: singleResult.title,
+      date: singleResult.date,
+      description: singleResult.description,
+      completed: singleResult.completed,
+      category: singleResult.category
+    }
   }
-
-  res.send({task: formattedResponse})
+  res.send({task: row})
 })
 
 // Update task
 app.put('/tasks/:id', async (req, res) => {
+  // Update title, description, and category for recurring tasks too
   const result = await client.execute({
     sql: `UPDATE Task
-          SET title=?, date=?, description=?, completed=?, category=?
+          SET title=?, description=?, category=?
           WHERE id=?`,
     args: [
       req.body.title,
-      req.body.date,
       req.body.description,
-      req.body.completed ? 1 : 0,
       req.body.category,
       req.params.id
     ]
   })
+
+  // Update date and completed only for this task
+  const singleResult = await client.execute({
+    sql: `UPDATE Task
+          SET date=?, completed=?
+          WHERE id=? AND date=?`,
+    args: [
+      req.body.date,
+      req.body.completed,
+      req.body.id,
+      req.body.initial_date
+    ]
+  })
+
+  // Set the recur settings
+  let err = false
+  // Delete the current settings
+  let recurResult = await client.execute({
+    sql: 'DELETE FROM Recur WHERE taskId=?',
+    args: [req.params.id]
+  })
+  // Add entries for the new settings
+  for (let day in req.body.recur) {
+    if (req.body.recur[day]) {
+      // Insert an entry into the recur table for each recurring day
+      const recurResult = await client.execute({
+        sql: 'INSERT INTO Recur VALUES(?,?)',
+        args: [req.params.id, day]
+      })
+      if (recurResult.rowsAffected != 1) err = true
+    }
+  }
   
   // Send a response based on success or failure
-  if (result.rowsAffected == 1) {
+  if (result.rowsAffected == 1 && !err) {
     res.send({message: 'Success'})
   } else {
     res.status(500).send({message: 'Database error'})
@@ -648,8 +770,6 @@ app.put('/tasks/:id', async (req, res) => {
 app.post('/tasks', async (req, res) => {
   // Create a UUID
   let newUuid = uuidv4()
-
-  console.log(`Creating task for user ${req.headers.authorization}`)
 
   // Send to the database
   const result = await client.execute({
@@ -665,10 +785,21 @@ app.post('/tasks', async (req, res) => {
     ]
   })
 
-  console.log('just inserted')
+  // Set the recur settings
+  let err = false
+  for (let day in req.body.recur) {
+    if (req.body.recur[day]) {
+      // Insert an entry into the recur table for each recurring day
+      const recurResult = await client.execute({
+        sql: 'INSERT INTO Recur VALUES(?,?)',
+        args: [newUuid, day]
+      })
+      if (recurResult.rowsAffected != 1) err = true
+    }
+  }
 
   // Send a response based on success or failure
-  if (result.rowsAffected == 1) {
+  if (result.rowsAffected == 1 && !err) {
     res.status(201).send({message: 'Success', id: newUuid})
   } else {
     res.status(500).send({message: 'Database error'})
@@ -676,20 +807,33 @@ app.post('/tasks', async (req, res) => {
 })
 
 // Delete task
-app.delete('/tasks/:id', async (req, res) => {
-  // First delete from GoalTask
-  const goalTaskResult = await client.execute({
-    sql: `DELETE FROM GoalTask WHERE taskId=?`,
+app.delete('/tasks/:id/:date', async (req, res) => {
+  // See if there are any tasks with this id left
+  const idResult = await client.execute({
+    sql: 'SELECT * FROM Task WHERE id=?',
     args: [req.params.id]
   })
+  if (idResult.rows.length <= 1) {
+    // First delete from GoalTask
+    const goalTaskResult = await client.execute({
+      sql: `DELETE FROM GoalTask WHERE taskId=?`,
+      args: [req.params.id, req.params.date]
+    })
+  }
 
   // Delete from database
   const result = await client.execute({
-    sql: `DELETE FROM Task WHERE id=?`,
-    args: [req.params.id]
+    sql: `DELETE FROM Task WHERE id=? AND date=?`,
+    args: [req.params.id, req.params.date]
   })
 
-  console.log(req.headers)
+  // Delete from recur table if specified in request
+  if (req.query.recur == 'true') {
+    const recurResult = await client.execute({
+      sql: `DELETE FROM Recur WHERE taskId=?`,
+      args: [req.params.id]
+    })
+  }
 
   // Send a response
   if (result.rowsAffected == 1) {
@@ -699,24 +843,7 @@ app.delete('/tasks/:id', async (req, res) => {
   }
 })
 
-// app.delete('*', async (req, res) => {
-//   console.log('request body')
-//   console.log(req.body)
-//   console.log('request headers')
-//   console.log(req.headers)
-//   console.log(req.params)
-//   res.status(404).send({message: 'Oops!'})
-// })
-
-// app.put('*', async (req, res) => {
-//   console.log('request body')
-//   console.log(req.body)
-//   console.log('request headers')
-//   console.log(req.headers)
-//   console.log(req.params)
-//   res.status(404).send({message: 'Oops!'})
-// })
-
+// Helper function to load goals from the database
 async function loadGoalsFromDatabase(user) {
   // Retrieve the goals from the database
   let goalResult = await client.execute({
@@ -770,6 +897,14 @@ async function loadGoalsFromDatabase(user) {
   return goals
 }
 
+// Helper function to sort tasks by date
+function sortByDate(a, b) {
+  let aDate = new Date(a.date)
+  let bDate = new Date(b.date)
+  return aDate.getTime() - bDate.getTime()
+}
+
+// Helper function to load tasks from the database
 async function loadTasksFromDatabase(user, listType) {
   // Retrieve the tasks from the database
   let taskResult = await client.execute({
@@ -778,13 +913,7 @@ async function loadTasksFromDatabase(user, listType) {
   })
   let categoryTemp = {}
   let dateTemp = {}
-  let sortedData = []
-  // let dataRowFormatted = {}
-  function sortByDate(a, b) {
-    let aDate = new Date(a.date)
-    let bDate = new Date(b.date)
-    return aDate.getTime() - bDate.getTime()
-  }
+  let sortedData = []  
 
   // Format and then sort by date
   for (let dataRow of taskResult.rows) {
@@ -794,8 +923,29 @@ async function loadTasksFromDatabase(user, listType) {
       date: dataRow.date,
       description: dataRow.description,
       completed: dataRow.completed == 1,
-      category: dataRow.category.toString()
+      category: dataRow.category.toString(),
+      recur: {
+        Sunday: false,
+        Monday: false,
+        Tuesday: false,
+        Wednesday: false,
+        Thursday: false,
+        Friday: false,
+        Saturday: false
+      }
     }
+
+    // Get recur information
+    let recurResult = await client.execute({
+      sql: 'SELECT day FROM Recur WHERE taskId=?',
+      args: [dataRowFormatted.id]
+    })
+    if (recurResult.rows.length > 0) {
+      for (let row of recurResult.rows) {
+        dataRowFormatted.recur[row.day] = true
+      }
+    }
+
     sortedData.push(dataRowFormatted)
   }
   sortedData.sort(sortByDate)
@@ -843,54 +993,75 @@ async function loadTasksFromDatabase(user, listType) {
   }
 }
 
+// Helper function to generate recurring tasks
+async function generateRecurring() {
+  // Get the day of the week based on date
+  let date = new Date()
+  let dayNumber = date.getDay()
+  let dayOfWeek = ''
+  switch(dayNumber) {
+    case 0:
+      dayOfWeek = 'Sunday'
+      break
+    case 1:
+      dayOfWeek = 'Monday'
+      break
+    case 2:
+      dayOfWeek = 'Tuesday'
+      break
+    case 3:
+      dayOfWeek = 'Wednesday'
+      break
+    case 4:
+      dayOfWeek = 'Thursday'
+      break
+    case 5:
+      dayOfWeek = 'Friday'
+      break
+    case 6:
+      dayOfWeek = 'Saturday'
+      break
+  }
+
+  // Get the recurring task IDs for today from the recur table
+  let recurResult = await client.execute({
+    sql: 'SELECT taskId FROM Recur WHERE day=?',
+    args: [dayOfWeek]
+  })
+  // If there aren't any, return
+  if (recurResult.rows === 0) return
+
+  for (let row of recurResult.rows) {
+    // Make sure it isn't a future recurring task--at least one iteration should have already happened
+    const taskResult = await client.execute({
+      sql: 'SELECT * FROM Task WHERE id=?',
+      args: [row.taskId]
+    })
+    for (let taskRow of taskResult.rows) {
+      // Compare dates to see if this one is due before today
+      let taskDate = new Date(taskRow.date)
+      if (taskDate.getTime() < date.getTime()) {
+        const insertResult = await client.execute({
+          sql: 'INSERT INTO Task VALUES(?,?,?,?,?,?,?)',
+          args: [
+            taskRow.id,
+            taskRow.title,
+            date.toDateString(),
+            taskRow.description,
+            0, // not completed
+            taskRow.category,
+            taskRow.user
+          ]
+        })
+      }
+    }
+  }
+
+}
+
 app.listen(port, async () => {
+  // Generate recurring tasks every day
+  setInterval(generateRecurring, 24*60*60*1000)
+
   console.log(`Server listening on port ${port}`)
 })
-
-/* Elephant graveyard */
-/*
-
-  // for (let i = 0; i < goals.length; i++) {
-  //   for (let j = 0; j < goals[i].length; j++) {
-  //     if (Object.hasOwn(goals[i][j], 'id') && goals[i][j].id == req.body.id) {
-  //       goals[i][j] = req.body
-  //       console.log(`Done! Goal is now ${JSON.stringify(goals[i][j])}`)
-  //     }
-  //   }
-  // }
-  // console.log(JSON.stringify(goals))
-
-
-  //   [
-//     'School',
-//     {
-//       id: 1,
-//       title: 'Get A\'s this semester',
-//       description: 'Get my GPA up to 3.85',
-//       frequency: 'once',
-//       quantity: 1,
-//       categoryId: 1
-//     },
-//     {
-//       id: 2,
-//       title: 'Finish homework before Netflix',
-//       description: '',
-//       frequency: 'daily',
-//       quantity: 1,
-//       categoryId: 1
-//     }
-//   ],
-//   [
-//     'Physical',
-//     {
-//       id: 3,
-//       title: 'Take a walk twice a day',
-//       description: 'At least a quarter mile!',
-//       frequency: 'daily',
-//       quantity: 2,
-//       categoryId: 5
-//     }
-//   ]
-
-
-*/
